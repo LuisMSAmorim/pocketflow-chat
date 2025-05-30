@@ -6,10 +6,22 @@ services:
     ports:
       - "8000:8000"
     depends_on:
-      - redis
+      migrations:
+        condition: service_completed_successfully
     environment:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
+      - DATABASE_URL=postgresql://user:password@postgres:5432/dbname
+      - POSTGRES_DB=dbname
+      - POSTGRES_USER=user
+      - POSTGRES_PASSWORD=password
+
+  migrations:
+    build: .
+    command: ./run_migrations.sh
+    depends_on:
+      postgres:
+        condition: service_healthy
 
   redis:
     image: redis:7.2-alpine
@@ -18,5 +30,22 @@ services:
     volumes:
       - redis_data:/data
 
+  postgres:
+    image: postgres:15-alpine
+    ports:
+      - "5431:5432"
+    environment:
+      - POSTGRES_DB=dbname
+      - POSTGRES_USER=user
+      - POSTGRES_PASSWORD=password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user -d dbname"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
 volumes:
-  redis_data: 
+  redis_data:
+  postgres_data:

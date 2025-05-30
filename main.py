@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends
 from pydantic import BaseModel
 import redis
 import json
@@ -8,6 +8,9 @@ import os
 from dateutil.parser import parse
 from dateutil import tz
 import asyncio
+from sqlalchemy.orm import Session
+from database import get_db
+from models import ChatHistory
 
 # Inicialização do cliente Redis
 redis_client = redis.Redis(
@@ -93,7 +96,7 @@ def parse_timestamp(timestamp_str: str) -> datetime:
     """Converte string de timestamp para objeto datetime."""
     return parse(timestamp_str).astimezone(tz.UTC)
 
-async def process_buffer_messages(chat_id: str) -> Message:
+async def process_buffer_messages(chat_id: str, db: Session) -> Message:
     """
     Processa as mensagens do buffer após o status 'prosseguir'.
     Retorna a última mensagem ordenada.
@@ -123,16 +126,21 @@ async def process_buffer_messages(chat_id: str) -> Message:
         formatted_time = timestamp.strftime("%H:%M:%S %d/%m/%y")
         formatted_content = "\n".join(content_parts) + f"  |  {formatted_time}"
         
-        db_entry = {
-            "type": "human",
-            "content": formatted_content.replace('"', '`'),
-            "additional_kwargs": {},
-            "response_metadata": {}
-        }
+        # Cria o objeto para salvar no banco
+        chat_history = ChatHistory(
+            session_id=chat_id,
+            message={
+                "type": "human",
+                "content": formatted_content.replace('"', '`'),
+                "additional_kwargs": {},
+                "response_metadata": {}
+            }
+        )
         
-        # Simula salvamento no banco imprimindo a entrada
-        print("\nMensagem a ser salva no banco:")
-        print(json.dumps(db_entry, indent=2))
+        # Salva no banco de dados
+        db.add(chat_history)
+        db.commit()
+        db.refresh(chat_history)
         
         # 4. Retorna a última mensagem ordenada
         return messages[-1]
@@ -180,7 +188,7 @@ async def root():
     return {"mensagem": "Bem-vindo à minha API FastAPI!"}
 
 @app.post("/message")
-async def send_message(webhook: WebhookPayload):
+async def send_message(webhook: WebhookPayload, db: Session = Depends(get_db)):
     try:
         # Converte o webhook para nosso modelo de mensagem
         message = map_webhook_to_message(webhook)
@@ -198,27 +206,38 @@ async def send_message(webhook: WebhookPayload):
         # Se precisar esperar, aguarda 3 segundos antes de retornar
         if flow_status == "esperar":
             await asyncio.sleep(3)
-            # Verifica novamente após a espera
+            
+            # Verifica novamente o status após a espera
             flow_status = await check_message_flow(chat_id, message)
             print(f"Status do fluxo após espera: {flow_status}")
-            response_data["flow_status"] = flow_status
-        
-        # Se status é 'prosseguir', processa as mensagens do buffer
-        if flow_status == "prosseguir":
-            last_message = await process_buffer_messages(chat_id)
-            response_data["last_message"] = last_message.dict()
-        
-        return response_data
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Erro ao processar mensagem: {str(e)}")
+            
+            if flow_status == "prosseguir":
+                await process_buffer_messages(chat_id, db)
+        else:
+            await process_buffer_messages(chat_id, db)
 
-@app.get("/messages/{chat_id}", response_model=List[Message])
-async def get_messages(chat_id: str, limit: int = 10):
-    try:
-        messages = redis_client.lrange(f"chat:{chat_id}", 0, limit - 1)
-        return [Message(**json.loads(msg)) for msg in messages]
+        return response_data
+
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Erro ao recuperar mensagens: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/messages/{chat_id}")
+async def get_messages(chat_id: str, limit: int = 10, db: Session = Depends(get_db)):
+    """
+    Retorna as últimas mensagens de um chat específico.
+    """
+    try:
+        # Busca as mensagens do banco de dados
+        messages = db.query(ChatHistory)\
+            .filter(ChatHistory.session_id == chat_id)\
+            .order_by(ChatHistory.created_at.desc())\
+            .limit(limit)\
+            .all()
+        
+        return messages
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.delete("/messages/cleanup")
 async def cleanup_messages():
