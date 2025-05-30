@@ -2,14 +2,14 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import redis
 import json
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from datetime import datetime
 import os
 from dateutil.parser import parse
 from dateutil import tz
 import asyncio
 
-# Inicialização do cliente Redis usando variáveis de ambiente
+# Inicialização do cliente Redis
 redis_client = redis.Redis(
     host=os.getenv('REDIS_HOST', 'localhost'),
     port=int(os.getenv('REDIS_PORT', 6379)),
@@ -21,6 +21,25 @@ app = FastAPI(
     description="Uma API de exemplo usando FastAPI",
     version="1.0.0"
 )
+
+# Modelos simplificados para o webhook
+class MessageKey(BaseModel):
+    remoteJid: str
+    id: str
+
+class WhatsAppMessage(BaseModel):
+    conversation: Optional[str] = None
+
+class WebhookData(BaseModel):
+    key: MessageKey
+    pushName: str
+    message: WhatsAppMessage
+    messageType: str
+
+class WebhookPayload(BaseModel):
+    event: str
+    data: WebhookData
+    date_time: str
 
 class ImageContent(BaseModel):
     image_id: str
@@ -34,6 +53,20 @@ class Message(BaseModel):
     timestamp: str
     event: str
     user_name: str
+
+def map_webhook_to_message(webhook: WebhookPayload) -> Message:
+    """
+    Mapeia o payload do webhook para nosso modelo Message.
+    """
+    return Message(
+        message_id=webhook.data.key.id,
+        chat_id=webhook.data.key.remoteJid,
+        content_type=webhook.data.messageType,
+        content=webhook.data.message.conversation or "",
+        timestamp=webhook.date_time,
+        event=webhook.event,
+        user_name=webhook.data.pushName
+    )
 
 def parse_timestamp(timestamp_str: str) -> datetime:
     """Converte string de timestamp para objeto datetime."""
@@ -98,14 +131,8 @@ async def check_message_flow(chat_id: str, current_message: Message) -> str:
         # Converte as mensagens do buffer
         messages = [Message(**json.loads(msg)) for msg in buffer_messages]
         
-        # Primeira mensagem do buffer (mais antiga)
-        first_message = messages[-1]
         # Última mensagem do buffer (mais recente)
         last_message = messages[0]
-        
-        # Se o ID da primeira mensagem é diferente da atual
-        if first_message.message_id != current_message.message_id:
-            return "nada a fazer"
         
         # Verifica o tempo desde a última mensagem
         current_ts = datetime.now(tz.UTC)
@@ -127,9 +154,13 @@ async def check_message_flow(chat_id: str, current_message: Message) -> str:
 async def root():
     return {"mensagem": "Bem-vindo à minha API FastAPI!"}
 
-@app.post("/message/{chat_id}")
-async def send_message(chat_id: str, message: Message):
+@app.post("/message")
+async def send_message(webhook: WebhookPayload):
     try:
+        # Converte o webhook para nosso modelo de mensagem
+        message = map_webhook_to_message(webhook)
+        chat_id = message.chat_id
+
         # 1. Insere mensagem no buffer
         redis_client.lpush(f"chat:{chat_id}", json.dumps(message.dict()))
         
@@ -138,7 +169,7 @@ async def send_message(chat_id: str, message: Message):
         print(f"Status do fluxo: {flow_status}")
         
         response_data = {"status": "success", "data": message.dict(), "flow_status": flow_status}
-        
+
         # Se precisar esperar, aguarda 3 segundos antes de retornar
         if flow_status == "esperar":
             await asyncio.sleep(3)
