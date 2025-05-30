@@ -39,6 +39,50 @@ def parse_timestamp(timestamp_str: str) -> datetime:
     """Converte string de timestamp para objeto datetime."""
     return parse(timestamp_str).astimezone(tz.UTC)
 
+async def process_buffer_messages(chat_id: str) -> Message:
+    """
+    Processa as mensagens do buffer após o status 'prosseguir'.
+    Retorna a última mensagem ordenada.
+    """
+    try:
+        # 1. Obtém e remove todas as mensagens do buffer
+        buffer_messages = redis_client.lrange(f"chat:{chat_id}", 0, -1)
+        redis_client.delete(f"chat:{chat_id}")
+        
+        if not buffer_messages:
+            raise ValueError("Buffer vazio")
+            
+        # 2. Converte e ordena as mensagens por timestamp
+        messages = [Message(**json.loads(msg)) for msg in buffer_messages]
+        messages.sort(key=lambda x: parse_timestamp(x.timestamp))
+        
+        # 3. Prepara o conteúdo para salvar no banco
+        content_parts = []
+        for msg in messages:
+            if isinstance(msg.content, str):
+                content_parts.append(msg.content)
+            else:
+                content_parts.append(f"[Image: {msg.content.image_id}]")
+        
+        formatted_content = "\n".join(content_parts)
+        db_entry = {
+            "type": "human",
+            "content": formatted_content.replace('"', '`'),
+            "additional_kwargs": {},
+            "response_metadata": {}
+        }
+        
+        # Simula salvamento no banco imprimindo a entrada
+        print("\nMensagem a ser salva no banco:")
+        print(json.dumps(db_entry, indent=2))
+        
+        # 4. Retorna a última mensagem ordenada
+        return messages[-1]
+        
+    except Exception as e:
+        print(f"Erro ao processar buffer: {str(e)}")
+        raise
+
 async def check_message_flow(chat_id: str, current_message: Message) -> str:
     """
     Verifica o fluxo da mensagem baseado nas condições especificadas.
@@ -89,9 +133,11 @@ async def send_message(chat_id: str, message: Message):
         # 1. Insere mensagem no buffer
         redis_client.lpush(f"chat:{chat_id}", json.dumps(message.dict()))
         
-        # 2 e 3. Verifica o fluxo da mensagem
+        # 2. Verifica o fluxo da mensagem
         flow_status = await check_message_flow(chat_id, message)
         print(f"Status do fluxo: {flow_status}")
+        
+        response_data = {"status": "success", "data": message.dict(), "flow_status": flow_status}
         
         # Se precisar esperar, aguarda 3 segundos antes de retornar
         if flow_status == "esperar":
@@ -99,12 +145,14 @@ async def send_message(chat_id: str, message: Message):
             # Verifica novamente após a espera
             flow_status = await check_message_flow(chat_id, message)
             print(f"Status do fluxo após espera: {flow_status}")
+            response_data["flow_status"] = flow_status
         
-        return {
-            "status": "success",
-            "data": message.dict(),
-            "flow_status": flow_status
-        }
+        # Se status é 'prosseguir', processa as mensagens do buffer
+        if flow_status == "prosseguir":
+            last_message = await process_buffer_messages(chat_id)
+            response_data["last_message"] = last_message.dict()
+        
+        return response_data
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erro ao processar mensagem: {str(e)}")
 
