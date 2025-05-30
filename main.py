@@ -22,24 +22,45 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# Modelos simplificados para o webhook
-class MessageKey(BaseModel):
-    remoteJid: str
-    id: str
+# Modelos atualizados para o webhook
+class DeviceListMetadata(BaseModel):
+    senderKeyHash: str
+    senderTimestamp: str
+    recipientKeyHash: str
+    recipientTimestamp: str
+
+class MessageContextInfo(BaseModel):
+    deviceListMetadata: DeviceListMetadata
+    deviceListMetadataVersion: int
+    messageSecret: str
 
 class WhatsAppMessage(BaseModel):
     conversation: Optional[str] = None
+    messageContextInfo: Optional[MessageContextInfo] = None
+
+class MessageKey(BaseModel):
+    remoteJid: str
+    fromMe: bool
+    id: str
 
 class WebhookData(BaseModel):
     key: MessageKey
     pushName: str
     message: WhatsAppMessage
     messageType: str
+    messageTimestamp: int
+    instanceId: str
+    source: str
 
 class WebhookPayload(BaseModel):
     event: str
+    instance: str
     data: WebhookData
+    destination: str
     date_time: str
+    sender: str
+    server_url: str
+    apikey: str
 
 class ImageContent(BaseModel):
     image_id: str
