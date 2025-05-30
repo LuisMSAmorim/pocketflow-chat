@@ -118,7 +118,11 @@ async def process_buffer_messages(chat_id: str) -> Message:
             else:
                 content_parts.append(f"[Image: {msg.content.image_id}]")
         
-        formatted_content = "\n".join(content_parts)
+        # Adiciona o timestamp apenas no final
+        timestamp = parse_timestamp(messages[-1].timestamp)
+        formatted_time = timestamp.strftime("%H:%M:%S %d/%m/%y")
+        formatted_content = "\n".join(content_parts) + f"  |  {formatted_time}"
+        
         db_entry = {
             "type": "human",
             "content": formatted_content.replace('"', '`'),
